@@ -3,7 +3,8 @@
 import { HEALTH } from './config.js';
 import { WEAPONS } from './weapons.js';
 
-const SAVE_KEY = 'double-contract.save';
+const SAVE_KEY = 'mercenaries-in-two.save';
+const OLD_SAVE_KEY = 'double-contract.save'; // the game's name before, still read so old saves load
 
 /** Upgrades for sale in the armory. Each level costs the next price in the list. */
 export const SHOP = [
@@ -21,8 +22,11 @@ export const MASKS = [
   { id: 'stripe', name: 'RACING STRIPE', price: 500 },
   { id: 'split', name: 'SPLIT FACE', price: 750 },
   { id: 'chevron', name: 'CHEVRONS', price: 1000 },
+  { id: 'hazard', name: 'HAZARD', price: 1200 },
   { id: 'teeth', name: 'GRIN', price: 1500 },
   { id: 'target', name: 'BULLSEYE', price: 2000 },
+  { id: 'skull', name: 'CALAVERA', price: 2500 },
+  { id: 'tribal', name: 'SERPENT', price: 3000 },
 ];
 export const MASK_COLORS = ['#e8e4dc', '#2a2a2e', '#c03028', '#d8a020', '#3a6a3a', '#3060a0'];
 
@@ -33,8 +37,8 @@ export function createProgress() {
     completed: [],
     upgrades: {},
     masks: ['plain'],
-    hatch: { pattern: 'stripe', base: '#e8e4dc', accent: '#c03028' },
-    cruz: { pattern: 'split', base: '#2a2a2e', accent: '#d8a020' },
+    hatch: { pattern: 'skull', base: '#e8e4dc', accent: '#2a2a2e' },
+    cruz: { pattern: 'tribal', base: '#2a2a2e', accent: '#d8a020' },
   };
 }
 
@@ -89,7 +93,7 @@ export function completeMission(progress, missionIndex, earned) {
 
 export function loadProgress(storage) {
   try {
-    const raw = storage?.getItem(SAVE_KEY);
+    const raw = storage?.getItem(SAVE_KEY) ?? storage?.getItem(OLD_SAVE_KEY);
     return raw ? { ...createProgress(), ...JSON.parse(raw) } : createProgress();
   } catch {
     return createProgress();

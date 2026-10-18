@@ -13,7 +13,7 @@ export function moveBody(level, b, dt) {
   const wasOnGround = b.onGround;
   b.hitWall = null;
   const reach = b.r + Math.abs(b.vx * dt) + Math.abs(b.vz * dt) + 1;
-  const boxes = boxesNear(level, b.x - reach, b.x + reach);
+  const boxes = boxesNear(level, b.x - reach, b.x + reach, b.z - reach, b.z + reach);
   const overlapsY = (box) => b.y < box.y1 - EPS && b.y + b.h > box.y0 + EPS;
   const overlapsX = (box) => b.x + b.r > box.x0 && b.x - b.r < box.x1;
   const overlapsZ = (box) => b.z + b.r > box.z0 && b.z - b.r < box.z1;
@@ -65,8 +65,8 @@ export function moveBody(level, b, dt) {
     }
   }
 
-  // The level's outer bounds
-  const W = level.halfWidth - b.r;
-  b.z = Math.max(-W, Math.min(W, b.z));
-  b.x = Math.max(b.r, Math.min(level.length - b.r, b.x));
+  // The edge of the map
+  const bd = level.bounds;
+  b.x = Math.max(bd.x0 + b.r, Math.min(bd.x1 - b.r, b.x));
+  b.z = Math.max(bd.z0 + b.r, Math.min(bd.z1 - b.r, b.z));
 }

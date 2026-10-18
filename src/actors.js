@@ -62,10 +62,10 @@ export const ENEMY_TYPES = {
   rifleman: { hp: 70, speed: 3.6, weapon: 'enemyRifle', pay: 100, burst: [4, 8] },
   shotgunner: { hp: 95, speed: 4.6, weapon: 'shotgun', pay: 150, rush: true },
   sniper: { hp: 60, speed: 2.4, weapon: 'enemySniper', pay: 200, sniper: true },
-  heavy: { hp: 420, speed: 1.7, weapon: 'lmg', pay: 500, armored: true, size: 1.2, burst: [12, 24] },
-  warlord: { hp: 1300, speed: 1.6, weapon: 'lmg', pay: 3000, armored: true, size: 1.35, boss: true, grenadier: true, burst: [16, 30], name: 'THE WARLORD' },
-  enforcer: { hp: 1150, speed: 3.8, weapon: 'shotgun', pay: 3000, armored: true, size: 1.35, boss: true, rush: true, name: 'THE ENFORCER' },
-  warden: { hp: 1700, speed: 1.4, weapon: 'minigun', pay: 4000, armored: true, size: 1.4, boss: true, grenadier: true, burst: [30, 60], name: 'THE WARDEN' },
+  heavy: { hp: 420, speed: 1.7, weapon: 'lmg', pay: 500, armored: true, size: 1.08, burst: [12, 24] },
+  warlord: { hp: 1300, speed: 1.6, weapon: 'lmg', pay: 3000, armored: true, size: 1.15, boss: true, grenadier: true, burst: [16, 30], name: 'THE WARLORD' },
+  enforcer: { hp: 1150, speed: 3.8, weapon: 'shotgun', pay: 3000, armored: true, size: 1.15, boss: true, rush: true, name: 'THE ENFORCER' },
+  warden: { hp: 1700, speed: 1.4, weapon: 'minigun', pay: 4000, armored: true, size: 1.15, boss: true, grenadier: true, burst: [30, 60], name: 'THE WARDEN' },
 };
 
 export function createEnemy(type, x, z, rng = Math.random) {

@@ -1,8 +1,10 @@
 // An autopilot that plays Hatch: for the title-screen demo and for testing that every mission
 // can be finished. It speaks the same input interface as the keyboard and mouse.
 import { chest, ENEMY_TYPES, eye } from './actors.js';
-import { areaAt } from './level.js';
+import { cameraOffset, CAMERA } from './config.js';
+import { inBounds } from './level.js';
 import { angleDiff, distXZ } from './math.js';
+import { nearestStandable, navDir, reachable } from './nav.js';
 
 export function createBot() {
   let game = null;
@@ -15,11 +17,23 @@ export function createBot() {
   let last = { x: 0, z: 0 };
   let unseen = 0;
   let stalled = 0; // frames spent near an armoured enemy without a shot at it
+  let blocked = 0; // frames the crosshair has stopped short of the target (a corner by the camera)
+  let shuffle = 0; // frames left stepping aside to clear the shot
 
   function aimAt(p, point) {
     const e = eye(p);
-    const yaw = Math.atan2(point.z - e.z, point.x - e.x);
-    const pitch = Math.atan2(point.y - e.y, Math.hypot(point.x - e.x, point.z - e.z));
+    let yaw = Math.atan2(point.z - e.z, point.x - e.x);
+    let pitch = Math.atan2(point.y - e.y, Math.hypot(point.x - e.x, point.z - e.z));
+    // Shots go where the crosshair points, and the camera sits behind the right shoulder: put the
+    // camera's ray through the point, not the eyes' (which would miss by the shoulder offset up close)
+    const off = cameraOffset(p.aimK ?? 0);
+    for (let k = 0; k < 3; k++) {
+      const f = { x: Math.cos(yaw) * Math.cos(pitch), y: Math.sin(pitch), z: Math.sin(yaw) * Math.cos(pitch) };
+      const side = p.camSide ?? off.right;
+      const c = { x: e.x - f.x * off.back - Math.sin(yaw) * side, y: e.y + CAMERA.up - f.y * off.back, z: e.z - f.z * off.back + Math.cos(yaw) * side };
+      yaw = Math.atan2(point.z - c.z, point.x - c.x);
+      pitch = Math.atan2(point.y - c.y, Math.hypot(point.x - c.x, point.z - c.z));
+    }
     const dy = angleDiff(p.aimYaw, yaw);
     const dp = pitch - p.aimPitch;
     look = { x: Math.max(-0.25, Math.min(0.25, dy)), y: Math.max(-0.1, Math.min(0.1, -dp)) };
@@ -31,28 +45,40 @@ export function createBot() {
   /** Where Hatch should be heading next. */
   function destination(p) {
     const level = game.level;
-    const i = areaAt(level, p.x);
+    const i = game.focusArea();
+    if (i < 0) {
+      // Everything's taken: the helicopter
+      const end = level.areas[level.areas.length - 1];
+      return end.extract || end.center;
+    }
     const area = level.areas[i];
     const st = game.areas[i];
+    if (!st.triggered) {
+      // On the way there. A walled-in area is reached over the wall from the one before it.
+      const prev = level.areas[i - 1];
+      if (prev?.boost && game.areas[prev.index].cleared && !reachable(level, p, area.center)) return prev.boost;
+      return area.center;
+    }
     const todo = area.objectives.find((o) => !o.done);
     if (todo) return todo;
-    if (st.cleared) {
-      if (area.boost) return area.boost;
-      if (area.extract) return area.extract;
-      return { x: area.x1 + 6, z: 0 };
-    }
     if (area.nest && game.enemiesIn(i).some((e) => e.tower)) return area.nest;
     // Armoured enemies only take damage from the side or back: go round them.
     const heavy = game.enemies.find((e) => !e.dead && e.area === i && ENEMY_TYPES[e.type].armored);
     if (heavy) {
-      const behind = { x: heavy.x - Math.cos(heavy.yaw) * 9, z: heavy.z - Math.sin(heavy.yaw) * 9 };
-      behind.z = Math.max(-level.halfWidth + 2, Math.min(level.halfWidth - 2, behind.z));
-      return behind;
+      // Behind him, or failing that off to one side: somewhere we can actually get to
+      for (const turn of [Math.PI, Math.PI * 0.7, -Math.PI * 0.7, Math.PI / 2, -Math.PI / 2]) {
+        const a = heavy.yaw + turn;
+        const spot = { x: heavy.x + Math.cos(a) * 9, z: heavy.z + Math.sin(a) * 9 };
+        if (!inBounds(level, spot.x, spot.z, 2)) continue;
+        const at = nearestStandable(level, spot, 3);
+        if (at && reachable(level, p, at)) return at;
+      }
+      return heavy;
     }
     const foe = game.enemies.find((e) => !e.dead && e.area === i);
     // Hold at a fighting distance, but go and flush them out if they've gone quiet
     if (foe) return distXZ(p, foe) > 14 || unseen > 180 ? foe : p;
-    return { x: Math.min(area.x1 - 3, p.x + 10), z: 0 };
+    return area.center;
   }
 
   return {
@@ -106,20 +132,36 @@ export function createBot() {
         const point = { ...chest(target), y: target.y + target.h - 0.2 };
         // Hold the trigger for automatic guns; tap it for semi-automatic ones.
         const auto = p.guns[p.weapon].def.auto;
-        if (aimAt(p, point) && (auto || !prev.has('fire'))) held.add('fire');
+        const onTarget = aimAt(p, point);
+        // The eyes can see round a corner the camera (behind the right shoulder) can't: if the
+        // crosshair stops short of the target, step left until it doesn't
+        const hit = game.mode === 'play' ? game.aimPoint(p) : null;
+        const clear = !hit || Math.hypot(hit.x - p.x, hit.z - p.z) > distXZ(p, target) - 1;
+        blocked = onTarget && !clear ? blocked + 1 : 0;
+        if (blocked > 20) {
+          shuffle = 40;
+          blocked = 0;
+        }
+        if (onTarget && clear && (auto || !prev.has('fire'))) held.add('fire');
       }
       if (p.guns[p.weapon].ammo === 0) held.add('reload');
       if (game.mode === 'snipe' && !target && !prev.has('use')) held.add('use'); // nothing left to snipe: climb down
       if (game.mode !== 'play') return;
 
-      // Walk toward the destination, sidestepping when stuck
+      // Walk toward the destination along a path, sidestepping when stuck
       const dest = destination(p);
-      let dx = dest.x - p.x;
-      let dz = dest.z - p.z;
-      const d = Math.hypot(dx, dz);
-      if (d > 0.8) {
-        dx /= d;
-        dz /= d;
+      const way = navDir(game.level, p, dest, game.frame);
+      let dx = way.x;
+      let dz = way.z;
+      const d = way.d;
+      if (shuffle > 0 && target) {
+        // Step to the left of the line to the target, away from the shoulder the camera's on
+        shuffle--;
+        const tx = target.x - p.x;
+        const tz = target.z - p.z;
+        const tl = Math.hypot(tx, tz) || 1;
+        wish = { x: (tz / tl) * 0.9 - (tx / tl) * 0.3, z: (-tx / tl) * 0.9 - (tz / tl) * 0.3 };
+      } else if (d > 0.8) {
         if (sidestep) {
           [dx, dz] = [-dz * Math.sign(sidestep), dx * Math.sign(sidestep)];
           sidestep -= Math.sign(sidestep);

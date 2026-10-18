@@ -4,8 +4,10 @@ import { chest, createEnemy, eye } from '../src/actors.js';
 import { createBot } from '../src/bot.js';
 import { AGGRO, HEALTH } from '../src/config.js';
 import { Game } from '../src/game.js';
-import { buildLevel, COVER_HEIGHT, groundHeight } from '../src/level.js';
+import { buildLevel, COVER_HEIGHT, groundHeight, inArea, removeBox } from '../src/level.js';
+import { distXZ } from '../src/math.js';
 import { MISSIONS } from '../src/missions.js';
+import { findPath, reachable, walkable } from '../src/nav.js';
 import { buyMask, buyUpgrade, completeMission, createProgress, loadout, loadProgress, saveProgress } from '../src/progress.js';
 import { openSpot, quietGame, seeded, step } from './helpers.js';
 
@@ -59,7 +61,44 @@ describe('levels', () => {
       assert.equal(groundHeight(level, p.x, p.z, 0.3), 0);
     }
   });
+
+  test('are open maps, not corridors', () => {
+    MISSIONS.forEach((m, i) => {
+      const { bounds } = buildLevel(i);
+      assert.ok(bounds.x1 - bounds.x0 > 400 && bounds.z1 - bounds.z0 > 280, `${m.name} is ${bounds.x1 - bounds.x0} x ${bounds.z1 - bounds.z0} m`);
+    });
+  });
+
+  test('every area can be reached on foot once the ones walled in before it are taken', () => {
+    MISSIONS.forEach((m, i) => {
+      const level = buildLevel(i);
+      const [a0, a1, a2, a3] = level.areas;
+      assert.ok(reachable(level, level.start, a0.center), `${m.name}: area 0`);
+      assert.ok(reachable(level, level.start, a1.center), `${m.name}: area 1`);
+      // Over the wall from area 1, or straight there
+      const into2 = a1.boost ? a1.boost.landing : level.start;
+      assert.ok(reachable(level, into2, a2.center), `${m.name}: area 2`);
+      assert.ok(!reachable(level, a2.center, a3.center), `${m.name}: the last area is shut until area 2 is taken`);
+      removeBox(level, a2.gate);
+      assert.ok(reachable(level, a2.center, a3.extract), `${m.name}: area 3 once its gate is open`);
+    });
+  });
+
+  test('paths go round buildings in straight, walkable legs', () => {
+    const level = buildLevel(0);
+    const from = level.start;
+    const to = level.areas[1].center;
+    const path = findPath(level, from, to);
+    assert.ok(path && path.length >= 1);
+    let at = from;
+    for (const p of path) {
+      assert.ok(walkable(level, at, p), `leg to ${p.x.toFixed(1)}, ${p.z.toFixed(1)}`);
+      at = p;
+    }
+    assert.ok(distXZ(at, to) < 1);
+  });
 });
+
 
 describe('moving', () => {
   test('walks, and sprints faster', () => {
@@ -87,7 +126,8 @@ describe('moving', () => {
 
   test('vaults over a crate', () => {
     const { game, input } = quietGame();
-    const crate = game.level.boxes.find((b) => b.kind === 'cover' && b.y1 <= 1.2 && b.x1 - b.x0 < 1.5 && Math.abs(b.z0) < 15);
+    const clear = (b, x) => groundHeight(game.level, x, (b.z0 + b.z1) / 2, 0.45) === 0;
+    const crate = game.level.boxes.find((b) => b.kind === 'cover' && b.y1 <= 1.2 && b.x1 - b.x0 < 1.5 && clear(b, b.x0 - 1.5) && clear(b, b.x0 - 0.8) && clear(b, b.x1 + 1.3));
     const h = stand(game, { x: crate.x0 - 0.8, z: (crate.z0 + crate.z1) / 2 });
     h.aimYaw = 0;
     input.hold('up');
@@ -114,7 +154,12 @@ describe('shooting', () => {
 
   test('cover stops bullets', () => {
     const { game, input } = quietGame();
-    const box = game.level.boxes.find((b) => b.kind === 'cover' && b.y1 >= 1.1 && b.z1 - b.z0 >= 1 && Math.abs(b.z0) < 15);
+    const openLine = (b) => {
+      const z = (b.z0 + b.z1) / 2;
+      for (let x = b.x0 - 8.5; x < b.x0 - 0.3; x += 0.4) if (groundHeight(game.level, x, z, 0.5) > 0) return false;
+      return groundHeight(game.level, b.x1 + 0.6, z, 0.4) === 0;
+    };
+    const box = game.level.boxes.find((b) => b.kind === 'cover' && b.y1 >= 1.1 && b.z1 - b.z0 >= 1 && openLine(b));
     const z = (box.z0 + box.z1) / 2;
     const e = placeEnemy(game, 'rifleman', box.x1 + 0.6, z);
     e.crouch = true;
@@ -172,6 +217,7 @@ describe('aggro', () => {
     const at = openSpot(game, 0, 9);
     placeEnemy(game, 'heavy', at.x + 20, at.z);
     stand(game, at, { x: at.x + 20, y: 1.2, z: at.z });
+    game.cruz.retarget = 1e9; // Cruz holds fire, so only Hatch's shots count
     input.hold('fire');
     step(game, input, 90);
     assert.ok(game.aggro > 20, `aggro ${game.aggro}`);
@@ -247,33 +293,51 @@ describe('going down', () => {
 });
 
 describe('the mission', () => {
-  test('walking into an area brings its first wave', () => {
+  test('walking into an area brings its first wave, and not before', () => {
     const game = new Game({ input: { down: () => false, pressed: () => false, look: () => ({ x: 0, y: 0 }), moveVector: () => ({ x: 0, z: 0 }) } });
-    game.hatch.x = game.level.areas[0].x0 + 6;
+    const area = game.level.areas[0];
+    game.update();
+    assert.ok(!game.areas[0].triggered, 'nothing yet at the start');
+    game.hatch.x = area.center.x;
+    game.hatch.z = area.center.z;
     game.update();
     assert.ok(game.areas[0].triggered);
     assert.equal(game.enemiesIn(0).length, 4);
   });
 
+  test('areas can be taken in any order', () => {
+    const game = new Game({ input: { down: () => false, pressed: () => false, look: () => ({ x: 0, y: 0 }), moveVector: () => ({ x: 0, z: 0 }) }, missionIndex: 1 });
+    const area = game.level.areas[2];
+    game.hatch.x = area.center.x;
+    game.hatch.z = area.center.z;
+    game.update();
+    assert.ok(game.areas[2].triggered && !game.areas[0].triggered);
+    assert.equal(game.checkpoint, 2);
+  });
+
   test('clearing an area opens its gate and pays out', () => {
     const { game } = quietGame();
-    const gate = game.level.areas[0].gate;
+    const i = game.level.areas.findIndex((a) => a.gate);
+    const area = game.level.areas[i];
+    const gate = area.gate;
     assert.ok(game.level.boxes.includes(gate));
-    game.areas[0].triggered = true;
-    game.areas[0].wave = game.level.areas[0].spec.waves.length - 1;
+    for (const o of area.objectives) o.done = true;
+    game.areas[i].triggered = true;
+    game.areas[i].wave = area.spec.waves.length - 1;
     game.updateAreas();
-    assert.ok(game.areas[0].cleared);
+    assert.ok(game.areas[i].cleared);
     assert.ok(!game.level.boxes.includes(gate));
     assert.ok(game.earned >= 500);
   });
 
   test('charges are set by holding Use, and the area stays shut until they are', () => {
     const { game, input } = quietGame();
-    const area = game.level.areas[2];
-    game.areas[2].triggered = true;
-    game.areas[2].wave = area.spec.waves.length - 1;
+    const i = game.level.areas.findIndex((a) => a.objectives.some((o) => o.kind === 'plant'));
+    const area = game.level.areas[i];
+    game.areas[i].triggered = true;
+    game.areas[i].wave = area.spec.waves.length - 1;
     game.updateAreas();
-    assert.ok(!game.areas[2].cleared, 'not with charges still to set');
+    assert.ok(!game.areas[i].cleared, 'not with charges still to set');
     for (const o of area.objectives) {
       stand(game, { x: o.x, z: o.z });
       step(game, input, 125, () => input.hold('use'));
@@ -281,19 +345,21 @@ describe('the mission', () => {
       assert.ok(o.done);
     }
     game.updateAreas();
-    assert.ok(game.areas[2].cleared);
+    assert.ok(game.areas[i].cleared);
   });
 
   test('step-jump: Cruz boosts Hatch over the wall, then follows', () => {
     const { game, input } = quietGame();
-    const area = game.level.areas[1];
-    game.areas[1].cleared = true;
+    const i = game.level.areas.findIndex((a) => a.boost);
+    const area = game.level.areas[i];
+    const inside = game.level.areas[i + 1];
+    game.areas[i].cleared = true;
     stand(game, { x: area.boost.x, z: area.boost.z });
     assert.equal(game.usable(game.hatch).kind, 'boost');
     input.tap('use');
     step(game, input, 120);
     assert.equal(game.mode, 'play');
-    assert.ok(game.hatch.x > area.x1 && game.cruz.x > area.x1);
+    assert.ok(inArea(inside, game.hatch) && inArea(inside, game.cruz), 'both over the wall');
   });
 
   test('co-op snipe: one shot from the nest drops two marksmen', () => {
@@ -321,15 +387,40 @@ describe('the mission', () => {
     assert.ok(game.hatch.guns.rifle.ammo > 0);
   });
 
-  test('reaching extraction with the last area clear completes the mission', () => {
+  test('extraction needs every area taken, then completes the mission', () => {
     const { game } = quietGame();
     game.quiet = false;
     const last = game.level.areas.length - 1;
     game.areas[last].cleared = true;
     stand(game, game.level.areas[last].extract);
     game.updateAreas();
+    assert.equal(game.mode, 'play', 'not with areas still held');
+    for (const st of game.areas) st.cleared = true;
+    game.updateAreas();
     assert.equal(game.mode, 'complete');
     assert.ok(game.earned >= MISSIONS[0].pay);
+  });
+
+  test('patrols walk their rounds until they see you', () => {
+    const { game, input } = quietGame();
+    // Hatch well away from everything
+    const far = { x: game.level.bounds.x1 - 4, z: game.level.bounds.z1 - 4 };
+    seeded(9, () => {
+      game.spawnPatrols();
+      const squad = game.enemies.filter((e) => e.patrol && e.patrol.squad === 0);
+      const start = squad.map((e) => ({ x: e.x, z: e.z }));
+      for (let f = 0; f < 240; f++) {
+        stand(game, far);
+        step(game, input, 1);
+      }
+      assert.ok(squad.every((e) => e.alert === false), 'still on their rounds');
+      assert.ok(squad.every((e, k) => distXZ(e, start[k]) > 4), 'walking the route');
+      // Now Hatch steps out in front of the leader
+      const lead = squad[0];
+      stand(game, { x: lead.x + Math.cos(lead.yaw) * 10, z: lead.z + Math.sin(lead.yaw) * 10 });
+      step(game, input, 12);
+      assert.ok(squad.every((e) => e.alert), 'the whole squad knows');
+    });
   });
 });
 

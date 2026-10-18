@@ -4,14 +4,18 @@
 import { chest, startReload, tickReload, walk } from './actors.js';
 import { PHYS } from './config.js';
 import { distXZ, yawTo } from './math.js';
+import { navDir, reachable } from './nav.js';
 
 const SIGHT = 60;
 
 function nearestVisibleEnemy(c, game, maxDist = SIGHT, filter = null) {
   let best = null;
   let bestD = maxDist;
+  // A patrol that hasn't noticed you is left alone, unless Hatch has started it or it's close
+  const loud = game.hatch.sinceShot < 240;
   for (const e of game.enemies) {
     if (e.dead || (filter && !filter(e))) continue;
+    if (e.alert === false && !loud && distXZ(c, e) > 12) continue;
     const d = distXZ(c, e);
     if (d < bestD && game.canSee(c, e)) {
       best = e;
@@ -42,9 +46,15 @@ function chooseCover(game, c, anchor, threat, { radius = 8, forward = false, fla
     const dThreat = Math.hypot(p.x - threat.x, p.z - threat.z);
     if (dThreat < 6) continue;
     let score = dAnchor + Math.abs(dThreat - 16) * 0.3;
-    if (forward) score -= (p.x - c.x) * 0.6;
-    if (flank) score -= Math.abs(p.z - game.hatch.z) * 0.5;
-    if (score < bestScore) {
+    // Advancing: toward the threat. Flanking: well off to the side of Hatch's line to it
+    if (forward) score -= (Math.hypot(c.x - threat.x, c.z - threat.z) - dThreat) * 0.6;
+    if (flank) {
+      const hx = threat.x - game.hatch.x;
+      const hz = threat.z - game.hatch.z;
+      const hl = Math.hypot(hx, hz) || 1;
+      score -= Math.abs(((p.x - game.hatch.x) * -hz + (p.z - game.hatch.z) * hx) / hl) * 0.5;
+    }
+    if (score < bestScore && reachable(game.level, c, p)) {
       best = p;
       bestScore = score;
     }
@@ -52,25 +62,15 @@ function chooseCover(game, c, anchor, threat, { radius = 8, forward = false, fla
   return best;
 }
 
+/** Walks toward a spot, round whatever's in the way, slowing as he gets there. True once there. */
 function moveTo(c, game, spot, speed) {
-  const dx = spot.x - c.x;
-  const dz = spot.z - c.z;
-  const d = Math.hypot(dx, dz);
-  if (d < 0.35) {
+  const n = navDir(game.level, c, spot, game.frame);
+  if (n.d < 0.35) {
     walk(c, game.level, { x: 0, z: 0 }, speed);
     return true;
   }
-  // Slide sideways for a moment when something's in the way
-  if (c.hitWall && !c.sidestep) c.sidestep = 24 * (Math.random() < 0.5 ? -1 : 1);
-  let wx = dx / d;
-  let wz = dz / d;
-  if (c.sidestep) {
-    const s = Math.sign(c.sidestep);
-    [wx, wz] = [-wz * s, wx * s];
-    c.sidestep -= s;
-  }
-  walk(c, game.level, { x: wx, z: wz }, Math.min(speed, d * 4 + 1));
-  if (!c.target) c.yaw = Math.atan2(wz, wx);
+  walk(c, game.level, { x: n.x, z: n.z }, Math.min(speed, n.d * 4 + 1));
+  if (!c.target) c.yaw = Math.atan2(n.z, n.x);
   return false;
 }
 
@@ -122,11 +122,12 @@ export function updatePartner(c, game) {
   }
 
   // Who to shoot (re-checked a few times a second)
-  if (--c.retarget <= 0 || (c.target && c.target.dead)) {
+  c.retarget = (c.retarget ?? 0) - 1;
+  if (c.retarget <= 0 || (c.target && c.target.dead)) {
     c.target = nearestVisibleEnemy(c, game);
     c.retarget = 20;
   }
-  const threat = c.target || game.enemies.find((e) => !e.dead && Math.abs(e.x - c.x) < 50);
+  const threat = c.target || game.enemies.find((e) => !e.dead && e.alert !== false && distXZ(e, c) < 50);
 
   // Where to be, by order
   let spot;
@@ -138,10 +139,27 @@ export function updatePartner(c, game) {
       c.cover = chooseCover(game, c, advancing ? c : h, threat, { radius: advancing ? 12 : 7, forward: advancing, flank });
       c.coverT = 0;
     }
-    spot = c.cover || { x: h.x - Math.cos(h.aimYaw) * 2.5, z: h.z - Math.sin(h.aimYaw) * 2.5 + 1.5 };
+    // No cover to hand: back and to the left of Hatch, out of the camera's way
+    spot = c.cover || { x: h.x - Math.cos(h.aimYaw) * 1.2 + Math.sin(h.aimYaw) * 2.6, z: h.z - Math.sin(h.aimYaw) * 1.2 - Math.cos(h.aimYaw) * 2.6 };
   } else {
-    // No enemies about: walk at Hatch's shoulder
-    spot = { x: h.x - Math.cos(h.aimYaw) * 2.2 - Math.sin(h.aimYaw) * 1.6, z: h.z - Math.sin(h.aimYaw) * 2.2 + Math.cos(h.aimYaw) * 1.6 };
+    // No enemies about: walk at Hatch's left shoulder (the camera is over his right)
+    spot = { x: h.x + Math.cos(h.aimYaw) * 0.4 + Math.sin(h.aimYaw) * 2.4, z: h.z + Math.sin(h.aimYaw) * 0.4 - Math.cos(h.aimYaw) * 2.4 };
+  }
+  // Hatch standing in the line of fire: step out to the other side of it
+  if (c.target && game.order !== 'hold') {
+    const tx = c.target.x - c.x;
+    const tz = c.target.z - c.z;
+    const len2 = tx * tx + tz * tz || 1;
+    const k = ((h.x - c.x) * tx + (h.z - c.z) * tz) / len2;
+    const ox = h.x - (c.x + tx * k);
+    const oz = h.z - (c.z + tz * k);
+    if (k > 0 && k < 1 && Math.hypot(ox, oz) < 0.8) {
+      const len = Math.sqrt(len2);
+      const nx = -tz / len;
+      const nz = tx / len;
+      const away = ox * nx + oz * nz > 0 ? -1 : 1;
+      spot = { x: c.x + nx * away * 2.5, z: c.z + nz * away * 2.5 };
+    }
   }
   const far = distXZ(c, spot) > 6;
   const arrived = moveTo(c, game, spot, far ? PHYS.sprint : PHYS.walk);
@@ -175,7 +193,7 @@ function shoot(c, game, target, spreadScale, steady = false) {
   gun.ammo--;
   c.fireCd = gun.def.rate + (gun.def.auto ? 1 : 6);
   game.fireAt(c, chest(target), gun.def, spreadScale);
-  game.sfx(c.weapon === 'pistol' ? 'pistolFar' : 'rifleFar');
+  game.sfx(c.weapon === 'pistol' ? 'pistolFar' : 'rifleFar', c);
   c.burst = (c.burst || 0) + 1;
   if (!steady && c.burst >= 6 + Math.floor(Math.random() * 5)) {
     c.burst = 0;

@@ -1,8 +1,12 @@
 // Enemy behaviour. Riflemen fight from cover, popping up for bursts; shotgunners rush; snipers
 // hold still and paint you with a laser before they fire; heavies and bosses walk forward behind
-// their armour, and some throw grenades. Targets are picked by aggro (game.pickTarget).
+// their armour, and some throw grenades. Targets are picked by aggro (game.pickTarget). Patrols
+// walk their routes until they see or hear you; an area's defenders won't follow you across the
+// map. Everyone gets about by the navigation grid (nav.js).
 import { chest, ENEMY_TYPES, walk } from './actors.js';
+import { inArea } from './level.js';
 import { distXZ, yawTo } from './math.js';
+import { navDir, reachable } from './nav.js';
 
 function protects(point, from) {
   const dx = from.x - point.x;
@@ -21,6 +25,7 @@ function findCover(e, game, threat) {
     if (dThreat < 7 || dThreat > 40) continue;
     if (game.enemies.some((o) => o !== e && !o.dead && o.cover && Math.hypot(o.cover.x - p.x, o.cover.z - p.z) < 1.2)) continue;
     const score = d + Math.abs(dThreat - 18) * 0.35;
+    if (score >= bestScore || !reachable(game.level, e, p)) continue;
     if (score < bestScore) {
       best = p;
       bestScore = score;
@@ -29,26 +34,39 @@ function findCover(e, game, threat) {
   return best;
 }
 
-function steer(e, game, spot, speed) {
-  const dx = spot.x - e.x;
-  const dz = spot.z - e.z;
-  const d = Math.hypot(dx, dz);
-  if (d < 0.4) {
+/** Walks toward a spot, round whatever's in the way. True once there. */
+function steer(e, game, spot, speed, near = 0.4) {
+  const n = navDir(game.level, e, spot, game.frame);
+  if (n.d < near) {
     walk(e, game.level, { x: 0, z: 0 }, speed);
     return true;
   }
-  // Blocked: slide sideways for a while (longer when we can't even see who we're after)
-  if (e.hitWall && !e.sidestep) e.sidestep = (e.sees ? 30 : 70) * (Math.random() < 0.5 ? -1 : 1);
-  let wx = dx / d;
-  let wz = dz / d;
-  if (e.sidestep) {
-    const s = Math.sign(e.sidestep);
-    [wx, wz] = [-wz * s, wx * s];
-    e.sidestep -= s;
-  }
-  walk(e, game.level, { x: wx, z: wz }, speed);
-  e.yaw = Math.atan2(wz, wx);
+  walk(e, game.level, { x: n.x, z: n.z }, speed);
+  e.yaw = Math.atan2(n.z, n.x);
   return false;
+}
+
+/** Has a patrolling enemy seen or heard either of you? Crouching keeps you harder to spot. */
+function noticed(e, game) {
+  for (const c of game.contractors) {
+    if (c.gone) continue;
+    const d = distXZ(e, c);
+    if (c.sinceShot < 3 && d < 55) return true; // gunfire carries
+    if (d < (c.crouch ? 3 : 7)) return true; // right on top of them
+    if (d > (c.crouch ? 22 : 42)) continue;
+    if (Math.cos(yawTo(e, c) - e.yaw) > 0.3 && game.canSee(e, c)) return true;
+  }
+  return false;
+}
+
+/** A patrol on its rounds: along the route at a walk, turning at each corner. */
+function patrol(e, game) {
+  const p = e.patrol;
+  const wp = p.route[p.i];
+  e.crouch = false;
+  steer(e, game, wp, 1.7, 0.4);
+  if (distXZ(e, wp) < 2.2) p.i = (p.i + 1) % p.route.length;
+  e.anim = 'walk';
 }
 
 function fire(e, game, target, spreadScale = 1) {
@@ -66,7 +84,7 @@ function fire(e, game, target, spreadScale = 1) {
   const moving = Math.hypot(target.vx, target.vz) > 3 ? 1.3 : 1;
   game.fireAt(e, chest(target), gun.def, spreadScale * moving * (0.7 + dist / 40));
   e.muzzle = 3;
-  game.sfx(e.type === 'sniper' ? 'sniperFar' : e.type === 'shotgunner' || e.type === 'enforcer' ? 'shotgun' : 'enemyRifle');
+  game.sfx(e.type === 'sniper' ? 'sniperFar' : e.type === 'shotgunner' || e.type === 'enforcer' ? 'shotgun' : e.type === 'warden' ? 'minigun' : ENEMY_TYPES[e.type].armored ? 'lmg' : 'enemyRifle', e);
   return true;
 }
 
@@ -77,7 +95,14 @@ export function updateEnemy(e, game) {
   if (e.fireCd > 0) e.fireCd--;
   if (e.reloadT > 0 && --e.reloadT === 0) e.gun.ammo = e.gun.def.mag;
   if (e.grenadeCd > 0) e.grenadeCd--;
+  if (e.throwT > 0) e.throwT--;
   const def = ENEMY_TYPES[e.type];
+
+  // On patrol and none the wiser: keep walking, keep looking
+  if (e.alert === false) {
+    if (e.animT % 6 === 0 && noticed(e, game)) game.alertSquad(e);
+    else return patrol(e, game);
+  }
 
   // Pick who to shoot every so often; between times, keep tracking whether we can see them.
   if (--e.retarget <= 0 || !e.target || e.target.gone) {
@@ -89,8 +114,37 @@ export function updateEnemy(e, game) {
   if (!goal) return walk(e, game.level, { x: 0, z: 0 }, 0);
   const dist = distXZ(e, goal);
 
+  // Nobody in sight and you've gone a long way off: an area's defenders go back to their posts,
+  // and a patrol back to its rounds
+  if (!e.sees && !e.tower) {
+    e.lost = (e.lost || 0) + 1;
+    const area = game.level.areas[e.area];
+    const strayed = area ? !inArea(area, goal, 45) : e.patrol && e.lost > 600 && !e.patrol.route.some((w) => distXZ(w, goal) < 70);
+    if (strayed) {
+      if (e.patrol) {
+        e.alert = false;
+        e.lost = 0;
+        return patrol(e, game);
+      }
+      e.crouch = false;
+      e.cover = null;
+      const there = steer(e, game, e.home || e, def.speed * 0.6);
+      e.anim = there ? 'aim' : 'walk';
+      return;
+    }
+  } else e.lost = 0;
+
   // Snipers on towers, or anyone with a sniper rifle: hold still, aim, then fire
   if (def.sniper) {
+    // A marksman on the ground with no line of sight for a while moves to find one
+    e.unseen = e.sees ? 0 : (e.unseen || 0) + 1;
+    if (!e.tower && e.unseen > 360) {
+      e.crouch = false;
+      e.aimT = 0;
+      steer(e, game, goal, def.speed);
+      e.anim = 'run';
+      return;
+    }
     walk(e, game.level, { x: 0, z: 0 }, 0);
     e.crouch = false;
     if (e.sees && dist < 120) {

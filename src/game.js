@@ -1,8 +1,9 @@
 import { createContractor, createEnemy, chest, ENEMY_TYPES, eye, isContractor } from './actors.js';
-import { AGGRO, CAMERA, HEALTH, PAL, STEP } from './config.js';
+import { AGGRO, cameraOffset, CAMERA, HEALTH, PAL, STEP } from './config.js';
 import { updateEnemy } from './enemies.js';
-import { areaAt, boxesNear, buildLevel, groundHeight, removeBox } from './level.js';
+import { boxesNear, boxesOnRay, buildLevel, groundHeight, inArea, removeBox } from './level.js';
 import { angleDiff, clamp, distXZ, rayBox, rayCylinder, yawTo } from './math.js';
+import { nearestStandable, standable } from './nav.js';
 import { updatePartner } from './partner.js';
 import { updatePlayer } from './player.js';
 import { createProgress, loadout } from './progress.js';
@@ -19,15 +20,16 @@ const BACK_TO_BACK_FRAMES = 1200;
  * and sound live elsewhere; `audio` only needs an optional sfx(name) method.
  */
 export class Game {
-  constructor({ input, audio = null, missionIndex = 0, progress = createProgress(), seed = 7 } = {}) {
+  constructor({ input, audio = null, missionIndex = 0, progress = createProgress(), seed = 7, difficulty = 1 } = {}) {
     this.input = input;
+    this.difficulty = difficulty; // scales the damage the contractors take
     this.audio = audio;
     this.progress = progress;
     this.loadout = loadout(progress);
     this.level = buildLevel(missionIndex, seed);
     this.missionIndex = missionIndex;
     this.mission = this.level.mission;
-    this.checkpoint = 0; // area to restart from
+    this.checkpoint = 0; // area to restart from (the last one walked into)
     this.areas = this.level.areas.map(() => ({ triggered: false, wave: 0, cleared: false }));
     this.earned = 0;
     this.stats = { kills: 0, headshots: 0, flanks: 0, coopSnipes: 0, downs: 0, restarts: 0 };
@@ -38,12 +40,21 @@ export class Game {
     this.reset();
   }
 
-  /** (Re)start from the checkpoint: both contractors at the start of that area, fully armed. */
+  /** (Re)start from the checkpoint: both contractors at the way into that area, fully armed. */
   reset() {
     const area = this.level.areas[this.checkpoint];
-    this.hatch = createContractor('hatch', area.start.x, -1.5, this.loadout);
-    this.cruz = createContractor('cruz', area.start.x - 1.2, 1.5, this.loadout);
+    const s = area.start;
+    const fresh = this.checkpoint === 0 && !this.areas.some((a) => a.triggered || a.cleared);
+    const yaw = fresh ? this.level.start.yaw : Math.atan2(area.center.z - s.z, area.center.x - s.x);
+    const f = { x: Math.cos(yaw), z: Math.sin(yaw) };
+    const r = { x: -f.z, z: f.x };
+    const ph = nearestStandable(this.level, { x: s.x + r.x * 0.8, z: s.z + r.z * 0.8 }) || s;
+    const pc = nearestStandable(this.level, { x: s.x - f.x * 1.4 - r.x * 1.6, z: s.z - f.z * 1.4 - r.z * 1.6 }) || s;
+    this.hatch = createContractor('hatch', ph.x, ph.z, this.loadout);
+    this.cruz = createContractor('cruz', pc.x, pc.z, this.loadout);
+    for (const c of this.contractors) c.yaw = c.aimYaw = yaw;
     this.enemies = [];
+    this.patrolsUp = false; // the patrols walking the roads come back too
     this.pickups = []; // ammo dropped by fallen enemies
     this.grenades = [];
     this.tracers = [];
@@ -81,8 +92,9 @@ export class Game {
     for (const fn of this.listeners) fn(type, data);
   }
 
-  sfx(name) {
-    this.audio?.sfx?.(name);
+  /** A sound, optionally from a place in the world (so it can be panned and faded with distance). */
+  sfx(name, at = null) {
+    this.audio?.sfx?.(name, at);
   }
 
   shake(n) {
@@ -118,6 +130,7 @@ export class Game {
     }
 
     this.prompt = null;
+    if (!this.patrolsUp && !this.quiet) this.spawnPatrols();
     updatePlayer(this.hatch, this, this.input);
     updatePartner(this.cruz, this);
     for (const e of this.enemies) if (!e.dead) updateEnemy(e, this);
@@ -140,7 +153,8 @@ export class Game {
     if (Math.abs(this.aggro) >= AGGRO.max) {
       this.overkill = { who: this.aggro > 0 ? 'hatch' : 'cruz', t: AGGRO.overkillFrames };
       this.sfx('overkill');
-      this.popupScreen('OVERKILL', PAL.orange);
+      this.popupScreen('REDLINE', PAL.orange);
+      this.emit('redline', this.overkill.who);
     }
   }
 
@@ -196,8 +210,7 @@ export class Game {
    */
   raycast(o, d, maxDist, { ignore = null, team = null } = {}) {
     let best = { t: maxDist, actor: null, box: null };
-    const xEnd = o.x + d.x * maxDist;
-    for (const b of boxesNear(this.level, Math.min(o.x, xEnd) - 1, Math.max(o.x, xEnd) + 1)) {
+    for (const b of boxesOnRay(this.level, o, d, maxDist)) {
       const t = rayBox(o, d, b);
       if (t < best.t) best = { t, actor: null, box: b };
     }
@@ -219,7 +232,7 @@ export class Game {
     const len = Math.hypot(d.x, d.y, d.z);
     if (len > 90) return false;
     const u = { x: d.x / len, y: d.y / len, z: d.z / len };
-    for (const box of boxesNear(this.level, Math.min(o.x, t.x), Math.max(o.x, t.x))) {
+    for (const box of boxesOnRay(this.level, o, u, len)) {
       if (rayBox(o, u, box) < len - 0.05) return false;
     }
     return true;
@@ -230,8 +243,8 @@ export class Game {
     const f = { x: Math.cos(c.aimYaw) * Math.cos(c.aimPitch), y: Math.sin(c.aimPitch), z: Math.sin(c.aimYaw) * Math.cos(c.aimPitch) };
     const r = { x: -Math.sin(c.aimYaw), z: Math.cos(c.aimYaw) };
     const e = eye(c);
-    const back = c.aiming ? CAMERA.aimBack : CAMERA.back;
-    const side = c.aiming ? CAMERA.aimRight : CAMERA.right;
+    const { back, right } = cameraOffset(c.aimK ?? (c.aiming ? 1 : 0));
+    const side = c.camSide ?? right;
     const cam = { x: e.x - f.x * back + r.x * side, y: e.y + CAMERA.up - f.y * back, z: e.z - f.z * back + r.z * side };
     // Start the ray level with the player, so nothing between the camera and him gets hit.
     const skip = back + 0.3;
@@ -268,14 +281,17 @@ export class Game {
       d.x /= dl;
       d.y /= dl;
       d.z /= dl;
-      const hit = this.raycast(from, d, def.range ?? 120, { ignore: new Set([shooter]) });
+      // The contractors' rounds pass each other by (no shooting through your partner's back);
+      // enemy rounds stop at whoever is in the way.
+      const hit = this.raycast(from, d, def.range ?? 120, { ignore: new Set([shooter]), team: isContractor(shooter) ? 'hostile' : null });
       const friendly = hit.actor && hit.actor.team !== enemyTeam;
       if (hit.actor && !friendly) {
         landed = hit.actor;
         this.hurt(hit.actor, def.damage, shooter, hit.point);
       }
-      this.tracers.push({ from, to: hit.point, life: 5, hostile: !isContractor(shooter) });
-      if (!hit.actor && (hit.box || hit.ground) && Math.random() < 0.6) this.addParticles(hit.point, 3, ['#c8b898', '#8a8478'], 2);
+      // What the bullet hit, for impact effects: a body, a box (and which), the ground or nothing
+      const impact = hit.actor ? 'flesh' : hit.box ? 'box' : hit.ground ? 'ground' : 'air';
+      this.tracers.push({ from, to: hit.point, life: 5, hostile: !isContractor(shooter), impact, box: hit.box, shooter, heavy: def.damage >= 100 });
     }
     if (isContractor(shooter)) {
       shooter.sinceShot = 0;
@@ -288,6 +304,7 @@ export class Game {
   hurt(target, amount, source, point) {
     if (isContractor(target)) return this.hurtContractor(target, amount, source);
     if (target.dead) return;
+    if (target.alert === false) this.alertSquad(target);
     const def = ENEMY_TYPES[target.type];
     let dmg = amount;
     const fromShooter = yawTo(target, source);
@@ -324,7 +341,7 @@ export class Game {
 
   hurtContractor(c, amount, source) {
     if (c.gone || this.mode === 'boost') return;
-    let dmg = amount;
+    let dmg = amount * this.difficulty;
     if (this.inOverkill(c)) dmg *= 0.5;
     if (c.downed) {
       c.bleed -= dmg * 6; // getting shot while down shortens the clock
@@ -333,9 +350,10 @@ export class Game {
     c.hp -= dmg;
     c.sinceHit = 0;
     c.flash = 4;
+    // Where it came from, for the damage direction indicator
+    if (source && source.x !== undefined) c.hitFrom = { x: source.x, z: source.z, frame: this.frame };
     if (c === this.hatch) this.shake(4);
     if (c.hp <= 0) this.downContractor(c);
-    void source;
   }
 
   downContractor(c) {
@@ -348,8 +366,9 @@ export class Game {
     c.reloadT = 0;
     c.weapon = 'pistol';
     this.stats.downs++;
-    this.sfx('down');
-    this.popup(c, c === this.hatch ? `${'HATCH'} IS DOWN` : 'CRUZ IS DOWN', PAL.red);
+    this.sfx('down', c);
+    this.popup(c, c === this.hatch ? 'HATCH IS DOWN' : 'CRUZ IS DOWN', PAL.red);
+    this.emit('down', c);
     if (this.mode === 'snipe') this.leaveNest();
   }
 
@@ -360,8 +379,9 @@ export class Game {
     c.weapon = 'rifle';
     c.sinceHit = 0;
     c.reviving = 0;
-    this.sfx('revive');
+    this.sfx('revive', c);
     this.popup(c, 'BACK ON YOUR FEET', PAL.green);
+    this.emit('revive', c);
   }
 
   killEnemy(e, source, tag) {
@@ -381,12 +401,12 @@ export class Game {
     this.earned += pay;
     this.popup(e, `$${pay}${tag && tag !== 'ARMOR' ? ` ${tag}` : ''}`, PAL.yellow);
     if (Math.random() < (def.boss ? 1 : 0.55)) this.pickups.push({ x: e.x, y: e.y, z: e.z, kind: 'ammo', t: 0 });
-    this.sfx(def.boss ? 'bossDown' : 'kill');
+    this.sfx(def.boss ? 'bossDown' : 'kill', e);
+    this.emit('kill', { enemy: e, source, tag, pay });
     if (def.boss) {
       this.shake(18);
       this.explode(chest(e), 0, null);
     }
-    void source;
   }
 
   /** Bodies don't walk through each other: overlapping pairs are pushed apart. */
@@ -422,7 +442,8 @@ export class Game {
   throwGrenade(thrower, dir, speed = 15) {
     const from = eye(thrower);
     this.grenades.push({ x: from.x, y: from.y, z: from.z, vx: dir.x * speed, vy: dir.y * speed + 4, vz: dir.z * speed, fuse: WEAPONS.grenade.fuse, team: thrower.team, owner: thrower });
-    this.sfx('throw');
+    this.sfx('throw', thrower);
+    thrower.throwT = 20; // for the throwing animation
   }
 
   updateGrenades() {
@@ -449,14 +470,15 @@ export class Game {
   }
 
   solidAt(x, y, z) {
-    for (const b of boxesNear(this.level, x, x)) if (x > b.x0 && x < b.x1 && y > b.y0 && y < b.y1 && z > b.z0 && z < b.z1) return true;
+    for (const b of boxesNear(this.level, x, x, z, z)) if (x > b.x0 && x < b.x1 && y > b.y0 && y < b.y1 && z > b.z0 && z < b.z1) return true;
     return false;
   }
 
   /** An explosion; grenades only hurt the side that didn't throw them. */
   explode(at, damage, grenade) {
-    this.sfx('boom');
+    this.sfx('boom', at);
     this.shake(12);
+    this.emit('explosion', { x: at.x, y: at.y, z: at.z });
     for (let i = 0; i < 28; i++) {
       const a = Math.random() * Math.PI * 2;
       const s = 2 + Math.random() * 6;
@@ -471,6 +493,7 @@ export class Game {
       const dmg = damage * (1 - d / R);
       if (isContractor(v)) this.hurtContractor(v, dmg * 0.45, grenade.owner);
       else {
+        if (v.alert === false) this.alertSquad(v);
         v.hp -= dmg;
         v.flash = 4;
         if (v.hp <= 0) this.killEnemy(v, grenade.owner, null);
@@ -541,11 +564,37 @@ export class Game {
     return this.enemies.filter((e) => !e.dead && e.area === index);
   }
 
+  /**
+   * The area that matters right now: the one you're fighting in (the nearest, if more than one
+   * is live), else the next one to take along the contract's route; -1 once everything's taken.
+   */
+  focusArea() {
+    const h = this.hatch;
+    let best = -1;
+    let bestD = Infinity;
+    for (const a of this.level.areas) {
+      const st = this.areas[a.index];
+      if (!st.triggered || st.cleared) continue;
+      const d = distXZ(h, a.center);
+      if (d < bestD) {
+        best = a.index;
+        bestD = d;
+      }
+    }
+    if (best >= 0) return best;
+    return this.areas.findIndex((st) => !st.cleared);
+  }
+
+  /** Is every area taken (so the helicopter can come)? */
+  get allClear() {
+    return this.areas.every((st) => st.cleared);
+  }
+
   updateAreas() {
     const h = this.hatch;
     this.level.areas.forEach((area, i) => {
       const st = this.areas[i];
-      if (!st.triggered && h.x > area.x0 + 5 && !st.cleared && !this.quiet) this.triggerArea(i);
+      if (!st.triggered && !st.cleared && !this.quiet && !h.downed && this.mode === 'play' && inArea(area, h, area.triggerPad)) this.triggerArea(i);
       if (!st.triggered || st.cleared) return;
       const alive = this.enemiesIn(i).length;
       const waves = area.spec.waves;
@@ -557,10 +606,9 @@ export class Game {
       if (st.wave >= waves.length - 1 && alive === 0 && objectivesDone && this.mode !== 'backToBack') this.clearArea(i);
     });
 
-    // Extraction: the last area, cleared, and Hatch at the pickup point
-    const last = this.level.areas.length - 1;
-    const end = this.level.areas[last];
-    if (end.extract && this.areas[last].cleared && distXZ(h, end.extract) < 5 && !h.downed && !this.cruz.downed) this.complete();
+    // Extraction: every area taken, and Hatch at the pickup point
+    const end = this.level.areas[this.level.areas.length - 1];
+    if (end.extract && this.allClear && distXZ(h, end.extract) < 5 && !h.downed && !this.cruz.downed) this.complete();
   }
 
   triggerArea(i) {
@@ -571,19 +619,13 @@ export class Game {
     this.checkpoint = i;
     this.banner = { text: area.name, sub: this.mission.name, t: 180 };
     this.sfx('area');
+    this.emit('areaTriggered', i);
     if (area.spec.backToBack) {
       this.startBackToBack(i);
       return;
     }
     this.spawnWave(i, 0);
-    if (area.spec.boss) {
-      const e = createEnemy(area.spec.boss, area.x1 - 10, 0);
-      e.area = i;
-      e.yaw = Math.PI;
-      this.enemies.push(e);
-      this.boss = e;
-      this.popupScreen(ENEMY_TYPES[area.spec.boss].name, PAL.red);
-    }
+    if (area.spec.boss) this.spawnBoss(area);
     if (area.spec.snipe) {
       for (const t of area.targets) {
         const e = createEnemy('sniper', t.x, t.z);
@@ -595,18 +637,60 @@ export class Game {
     }
   }
 
+  spawnBoss(area) {
+    const at = area.bossAt || area.center;
+    const e = createEnemy(area.spec.boss, at.x, at.z);
+    e.area = area.index;
+    e.home = { x: at.x, z: at.z };
+    e.yaw = yawTo(e, this.hatch);
+    this.enemies.push(e);
+    this.boss = e;
+    this.popupScreen(ENEMY_TYPES[area.spec.boss].name, PAL.red);
+  }
+
+  /** A wave comes in at the area's spawn points: out of sight, and not right on top of you. */
   spawnWave(i, wave) {
     const area = this.level.areas[i];
-    const spots = [...area.spawns].sort(() => Math.random() - 0.5);
+    const h = this.hatch;
+    const shuffle = (list) => list.map((s) => [Math.random(), s]).sort((a, b) => a[0] - b[0]).map((p) => p[1]);
+    const far = shuffle(area.spawns.filter((s) => distXZ(h, s) >= 18));
+    const near = shuffle(area.spawns.filter((s) => distXZ(h, s) < 18));
+    const spots = [...far, ...near];
     let k = 0;
     for (const [type, count] of area.spec.waves[wave] || []) {
       for (let n = 0; n < count; n++) {
         const s = spots[k++ % spots.length];
         const e = createEnemy(type, s.x, s.z);
         e.area = i;
+        e.home = { x: s.x, z: s.z };
+        e.yaw = yawTo(e, h);
         this.enemies.push(e);
       }
     }
+  }
+
+  /** Squads walking their routes between the areas, until they see or hear you. */
+  spawnPatrols() {
+    this.patrolsUp = true;
+    this.level.patrols.forEach((p, k) => {
+      p.squad.forEach((type, n) => {
+        const at = nearestStandable(this.level, { x: p.route[0].x - n * 1.6, z: p.route[0].z + (n % 2 ? 1.2 : -1.2) }) || p.route[0];
+        const e = createEnemy(type, at.x, at.z);
+        e.area = -1;
+        e.alert = false;
+        e.patrol = { route: p.route, i: 1 % p.route.length, squad: k, slot: n };
+        e.home = { x: at.x, z: at.z };
+        e.yaw = yawTo(e, p.route[e.patrol.i]);
+        this.enemies.push(e);
+      });
+    });
+  }
+
+  /** Someone in a patrol has seen or heard you: the whole squad knows. */
+  alertSquad(e) {
+    if (e.alert !== false) return;
+    for (const o of this.enemies) if (!o.dead && o.patrol && o.patrol.squad === e.patrol.squad) o.alert = true;
+    this.sfx('alert', e);
   }
 
   clearArea(i) {
@@ -615,15 +699,13 @@ export class Game {
     st.cleared = true;
     this.earned += PAY.area;
     this.resupply();
-    this.checkpoint = Math.min(i + 1, this.level.areas.length - 1);
-    if (area.gate && area.gate.kind === 'gate') {
-      removeBox(this.level, area.gate);
-      this.popupScreen('AREA CLEAR - MOVE UP', PAL.green);
-    } else if (area.boost) {
-      this.popupScreen('AREA CLEAR - STEP-JUMP THE WALL', PAL.green);
-    } else if (area.extract) {
-      this.popupScreen('AREA CLEAR - GET TO THE EXTRACTION POINT', PAL.green);
-    }
+    this.checkpoint = i;
+    const gate = area.gate && area.gate.kind === 'gate' && !area.gate.removed ? area.gate : null;
+    if (gate) removeBox(this.level, gate);
+    if (this.allClear && this.level.areas.some((a) => a.extract)) this.popupScreen('ALL CLEAR - GET TO THE EXTRACTION POINT', PAL.green);
+    else if (gate) this.popupScreen('AREA CLEAR - THE GATE IS OPEN', PAL.green);
+    else if (area.boost) this.popupScreen('AREA CLEAR - GIVE HATCH A LEG-UP', PAL.green);
+    else this.popupScreen('AREA CLEAR', PAL.green);
     if (area.spec.boss) this.boss = null;
     this.sfx('clear');
     this.emit('areaCleared', i);
@@ -641,14 +723,17 @@ export class Game {
   usable(c) {
     const partner = this.partnerOf(c);
     if (partner.downed && !partner.gone && distXZ(c, partner) < USE_RANGE) return { kind: 'revive', target: partner, label: `HOLD E: REVIVE ${partner.who.toUpperCase()}` };
-    const i = areaAt(this.level, c.x);
-    const area = this.level.areas[i];
-    for (const o of area.objectives) {
-      if (!o.done && distXZ(c, o) < USE_RANGE + 0.6) return { kind: 'objective', target: o, label: o.kind === 'plant' ? 'HOLD E: SET CHARGE' : 'HOLD E: FREE THE HOSTAGE' };
+    for (const area of this.level.areas) {
+      for (const o of area.objectives) {
+        if (!o.done && distXZ(c, o) < USE_RANGE + 0.6) return { kind: 'objective', target: o, label: o.kind === 'plant' ? 'HOLD E: SET CHARGE' : 'HOLD E: FREE THE HOSTAGE' };
+      }
     }
-    if (area.boost && this.areas[i].cleared && distXZ(c, area.boost) < 3.5) return { kind: 'boost', target: area, label: 'PRESS E: STEP-JUMP' };
-    if (area.nest && this.areas[i].triggered && distXZ(c, area.nest) < 4 && this.mode === 'play' && area.targets.length && this.enemiesIn(i).some((e) => e.tower)) {
-      return { kind: 'nest', target: area, label: 'PRESS E: CO-OP SNIPE' };
+    for (const area of this.level.areas) {
+      const i = area.index;
+      if (area.boost && this.areas[i].cleared && distXZ(c, area.boost) < 3.5) return { kind: 'boost', target: area, label: 'PRESS E: LEG-UP' };
+      if (area.nest && this.areas[i].triggered && distXZ(c, area.nest) < 4 && this.mode === 'play' && area.targets.length && this.enemiesIn(i).some((e) => e.tower)) {
+        return { kind: 'nest', target: area, label: 'PRESS E: SYNC SHOT' };
+      }
     }
     return null;
   }
@@ -668,7 +753,7 @@ export class Game {
         this.earned += PAY.objective;
         if (o.kind === 'plant') {
           this.popupScreen('CHARGE SET', PAL.yellow);
-          this.sfx('plant');
+          this.sfx('plant', o);
           o.blowAt = this.frame + 150;
         } else {
           this.popupScreen('HOSTAGE FREED', PAL.green);
@@ -688,6 +773,7 @@ export class Game {
           o.blowAt = null;
           o.blown = true;
           this.explode({ x: o.x + 2.4, y: 1.5, z: o.z }, 0, null);
+          this.emit('targetDestroyed', o);
           this.shake(20);
         }
       }
@@ -710,21 +796,28 @@ export class Game {
     const k = Math.min(1, this.modeT / BOOST_FRAMES);
     const h = this.hatch;
     const c = this.cruz;
-    const wallTop = a.gate.y1;
+    const B = a.boost;
+    const wallTop = B.wall?.y1 ?? 3.4;
+    // Into the wall, and to its right
+    const len = Math.hypot(B.landing.x - B.x, B.landing.z - B.z) || 1;
+    const f = { x: (B.landing.x - B.x) / len, z: (B.landing.z - B.z) / len };
+    const r = { x: -f.z, z: f.x };
     // Cruz kneels at the wall; Hatch steps on him, goes over, and Cruz follows.
-    c.x = a.boost.x - 0.5;
-    c.z = a.boost.z + 0.8;
+    c.x = B.x - f.x * 0.5 + r.x * 0.8;
+    c.z = B.z - f.z * 0.5 + r.z * 0.8;
     c.crouch = k < 0.6;
-    h.x = k < 0.5 ? a.boost.x : a.boost.landing.x;
-    h.z = a.boost.z;
+    h.x = k < 0.5 ? B.x : B.landing.x;
+    h.z = k < 0.5 ? B.z : B.landing.z;
     h.y = k < 0.5 ? wallTop * (k / 0.5) : Math.max(0, wallTop * (1 - (k - 0.5) / 0.2));
     h.anim = 'boost';
     c.anim = 'boost';
     if (k >= 1) {
-      h.x = a.boost.landing.x;
+      h.x = B.landing.x;
+      h.z = B.landing.z;
       h.y = 0;
-      c.x = a.boost.landing.x - 1;
-      c.z = a.boost.landing.z + 1.5;
+      const pc = nearestStandable(this.level, { x: B.landing.x - f.x + r.x * 1.5, z: B.landing.z - f.z + r.z * 1.5 }) || B.landing;
+      c.x = pc.x;
+      c.z = pc.z;
       c.y = 0;
       c.crouch = false;
       this.mode = 'play';
@@ -747,14 +840,17 @@ export class Game {
     h.reloadT = 0; // a rifle reload doesn't carry over to the marksman rifle
     h.aiming = true;
     h.crouch = false;
-    h.aimYaw = 0.25;
+    // Facing the towers
+    const tx = area.targets.reduce((sum, t) => sum + t.x, 0) / area.targets.length;
+    const tz = area.targets.reduce((sum, t) => sum + t.z, 0) / area.targets.length;
+    h.aimYaw = Math.atan2(tz - n.z, tx - n.x);
     h.aimPitch = 0.02;
     const c = this.cruz;
     c.x = n.x - 1.5;
     c.z = n.z + 0.8;
     c.y = n.y;
     c.weapon = 'sniper';
-    this.popupScreen('CO-OP SNIPE: TAKE A SHOT, CRUZ TAKES ANOTHER', PAL.blue);
+    this.popupScreen('SYNC SHOT: FIRE AND CRUZ FIRES WITH YOU', PAL.blue);
     this.sfx('select');
   }
 
@@ -778,7 +874,7 @@ export class Game {
     if (hit?.dead) {
       this.stats.coopSnipes++;
       this.earned += PAY.coopSnipe;
-      this.popupScreen(`CO-OP SNIPE +$${PAY.coopSnipe}`, PAL.blue);
+      this.popupScreen(`SYNC SHOT +$${PAY.coopSnipe}`, PAL.blue);
     }
     if (!this.enemiesIn(area.index).some((e) => e.tower)) this.leaveNest();
   }
@@ -789,10 +885,12 @@ export class Game {
     this.mode = 'backToBack';
     this.modeT = 0;
     this.timeScale = 0.55;
-    const cx = area.x0 + area.spec.length * 0.4;
+    const at = area.ambush || area.center;
+    const cx = at.x;
+    const cz = at.z;
     for (const [c, side] of [[this.hatch, -1], [this.cruz, 1]]) {
       c.x = cx;
-      c.z = side * 0.45;
+      c.z = cz + side * 0.45;
       c.y = 0;
       c.vx = c.vz = 0;
       c.crouch = false;
@@ -800,25 +898,26 @@ export class Game {
     }
     this.hatch.aimYaw = 0;
     this.cruz.yaw = Math.PI;
-    this.b2bCenter = { x: cx, z: 0 };
+    this.b2bCenter = { x: cx, z: cz };
     // A ring of attackers, out past the nearest cover
     const n = 10;
     for (let k = 0; k < n; k++) {
       const a = (k / n) * Math.PI * 2;
       let r = 15;
       let x = cx + Math.cos(a) * r;
-      let z = Math.sin(a) * r * 0.9;
-      for (let tries = 0; tries < 10 && (groundHeight(this.level, x, z, 0.5) > 0 || Math.abs(z) > this.level.halfWidth - 2); tries++) {
+      let z = cz + Math.sin(a) * r * 0.9;
+      for (let tries = 0; tries < 10 && (groundHeight(this.level, x, z, 0.5) > 0 || !standable(this.level, { x, z })); tries++) {
         r -= 1;
         x = cx + Math.cos(a) * r;
-        z = Math.sin(a) * r * 0.9;
+        z = cz + Math.sin(a) * r * 0.9;
       }
       const e = createEnemy(k % 4 === 3 ? 'shotgunner' : 'rifleman', x, z);
       e.area = i;
+      e.home = { x, z };
       e.yaw = yawTo(e, this.b2bCenter);
       this.enemies.push(e);
     }
-    this.popupScreen('BACK TO BACK', PAL.orange);
+    this.popupScreen('SURROUNDED', PAL.orange);
     this.sfx('overkill');
   }
 
@@ -830,15 +929,9 @@ export class Game {
     if (left === 0 || this.modeT > BACK_TO_BACK_FRAMES) {
       this.mode = 'play';
       this.timeScale = 1;
-      this.popupScreen('BACK TO BACK: CLEAR', PAL.green);
+      this.popupScreen('BREAKOUT: CLEAR', PAL.green);
       if (area) {
-        if (area.spec.boss) {
-          const e = createEnemy(area.spec.boss, area.x1 - 10, 0);
-          e.area = area.index;
-          this.enemies.push(e);
-          this.boss = e;
-          this.popupScreen(ENEMY_TYPES[area.spec.boss].name, PAL.red);
-        }
+        if (area.spec.boss) this.spawnBoss(area);
         this.spawnWave(area.index, 0);
       }
     }

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mercenaries In Two</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%2307080a'/%3E%3Cpath d='M14 14h12a18 18 0 0 1 0 36H14z' fill='%23f2f1ec'/%3E%3Cpath d='M38 14h12v36H38a18 18 0 0 1 0-36z' fill='%23ffae3a'/%3E%3C/svg%3E" />
+    <meta name="description" content="MERCENARIES IN TWO: a co-op third-person shooter. You and an AI partner, two private military contractors, one paycheck." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600;700;800&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="view"></canvas>
+      <canvas id="hud"></canvas>
+      <div id="hurt"></div>
+      <div id="bars"><div></div><div></div></div>
+      <div id="ui"></div>
+      <div id="fade" class="on"></div>
+      <div id="boot">
+        <div class="boot-logo">MERCENARIES IN<span>TWO</span></div>
+        <div class="boot-bar"><i></i></div>
+      </div>
+    </div>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

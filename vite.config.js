@@ -4,5 +4,5 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   base: './',
   server: { port: 5193 },
-  build: { chunkSizeWarningLimit: 1200 }, // three.js is most of the bundle
+  build: { chunkSizeWarningLimit: 1600 }, // three.js is most of the bundle
 });

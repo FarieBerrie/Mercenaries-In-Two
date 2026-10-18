@@ -1,13 +1,13 @@
 // Names shown in the game. Everything here is original.
 export const GAME = {
-  title: 'DOUBLE CONTRACT',
+  title: 'MERCENARIES IN TWO',
   tagline: 'TWO CONTRACTORS. ONE PAYCHECK.',
   player: 'HATCH',
   partner: 'CRUZ',
 };
 
-// The simulation runs at a fixed 60 steps a second. World units are metres; +x runs forward
-// through each mission, y is up.
+// The simulation runs at a fixed 60 steps a second. World units are metres; y is up, and +x is
+// the compass's north on each mission's open map.
 export const STEP = 1 / 60;
 
 export const PHYS = {
@@ -32,14 +32,27 @@ export const BODY = {
 // Over-the-shoulder camera, shared by aiming (game.js) and drawing (main.js) so the crosshair
 // lines up exactly with where shots go.
 export const CAMERA = {
-  back: 3.4, // metres behind the player
-  right: 0.65, // over the right shoulder
-  up: 0.25, // above eye level
-  aimBack: 1.5, // closer in when aiming down sights
-  aimRight: 0.55,
-  fov: 62,
+  back: 2.75, // metres behind the player: a close over-the-shoulder view
+  right: 0.78, // over the right shoulder
+  up: 0.16, // above eye level
+  aimBack: 1.35, // closer in when aiming down sights
+  aimRight: 0.62,
+  fov: 60,
   aimFov: 38,
 };
+
+/**
+ * The camera's offset from the eye for an aim blend k (0 = hip, 1 = down the sights), eased so
+ * the zoom settles softly. The aim ray and the drawn camera both use this, so they always agree.
+ */
+export function cameraOffset(k) {
+  const s = k * k * (3 - 2 * k);
+  return {
+    back: CAMERA.back + (CAMERA.aimBack - CAMERA.back) * s,
+    right: CAMERA.right + (CAMERA.aimRight - CAMERA.right) * s,
+    fov: CAMERA.fov + (CAMERA.aimFov - CAMERA.fov) * s,
+  };
+}
 
 export const HEALTH = {
   max: 100, // + armour upgrades

@@ -1,6 +1,7 @@
 import { createRng } from '../src/rng.js';
 import { Game } from '../src/game.js';
 import { rebuildGrid } from '../src/level.js';
+import { rebuildNav } from '../src/nav.js';
 
 /**
  * Input a test can drive. Directions are relative to where Hatch aims: up = forward. look is
@@ -72,15 +73,17 @@ export function seeded(seed, fn) {
 }
 
 /**
- * A clear range for a test: removes the cover and blocks from the first 40 m of an area and
- * returns a spot in the middle of it.
+ * A clear range for a test: removes the cover, buildings, trees and rocks from a 44 m square
+ * round the middle of an area and returns a spot in its west half, with open ground east of it.
  */
 export function openSpot(game, area = 0) {
   const a = game.level.areas[area];
-  const x0 = a.x0 + 2;
-  const x1 = a.x0 + 42;
-  game.level.boxes = game.level.boxes.filter((b) => !((b.kind === 'cover' || b.kind === 'block' || b.kind === 'target') && b.x1 > x0 && b.x0 < x1));
+  const c = a.center;
+  const [x0, x1, z0, z1] = [c.x - 22, c.x + 22, c.z - 22, c.z + 22];
+  const clearable = ['cover', 'block', 'target', 'rock', 'tree', 'pillar', 'tower'];
+  game.level.boxes = game.level.boxes.filter((b) => !(clearable.includes(b.kind) && b.x1 > x0 && b.x0 < x1 && b.z1 > z0 && b.z0 < z1));
   rebuildGrid(game.level);
+  rebuildNav(game.level);
   game.level.cover = game.level.cover.filter((p) => game.level.boxes.includes(p.box));
-  return { x: a.x0 + 10, z: 0 };
+  return { x: c.x - 12, z: c.z };
 }

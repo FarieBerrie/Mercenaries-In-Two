@@ -1,8 +1,8 @@
 // Hatch: the contractor you play. Mouse aims, the body faces where you aim, and every shot goes
 // where the crosshair points (game.aimPoint).
-import { aimVector, startReload, tickReload, walk } from './actors.js';
-import { PHYS } from './config.js';
-import { boxesNear, COVER_HEIGHT } from './level.js';
+import { aimVector, eye, startReload, tickReload, walk } from './actors.js';
+import { cameraOffset, CAMERA, PHYS } from './config.js';
+import { boxesNear, COVER_HEIGHT, roomAlong } from './level.js';
 import { clamp } from './math.js';
 
 const VAULT_FRAMES = 18;
@@ -10,7 +10,7 @@ const VAULT_FRAMES = 18;
 /** A low box right in front, to vault over, and where you'd land. */
 function vaultTarget(p, level, dir) {
   const probe = { x: p.x + dir.x * 0.9, z: p.z + dir.z * 0.9 };
-  for (const b of boxesNear(level, probe.x - 1, probe.x + 1)) {
+  for (const b of boxesNear(level, probe.x - 1, probe.x + 1, probe.z - 1, probe.z + 1)) {
     if (b.y1 > COVER_HEIGHT + 0.05 || b.y1 - p.y < 0.4) continue;
     if (probe.x < b.x0 - 0.2 || probe.x > b.x1 + 0.2 || probe.z < b.z0 - 0.2 || probe.z > b.z1 + 0.2) continue;
     // Land just past the far side of the box along the vault direction
@@ -70,6 +70,17 @@ export function updatePlayer(p, game, input) {
   // ---- Stance
   if (input.pressed('crouch') && !p.downed) p.crouch = !p.crouch;
   p.aiming = (input.down('aim') || game.mode === 'snipe') && game.mode !== 'backToBack';
+  // Eases toward the sights over about a sixth of a second; the camera and the aim ray share it.
+  p.aimK = clamp((p.aimK ?? 0) + (p.aiming ? 0.1 : -0.1), 0, 1);
+  // The camera sits off the right shoulder; with a wall or a stack right there it comes in toward
+  // the head (quickly) rather than into the wall, and eases back out once there's room. The aim
+  // ray uses the same offset, so the crosshair always shows where shots go.
+  const off = cameraOffset(p.aimK);
+  const e = eye(p);
+  const room = roomAlong(level, { x: e.x, y: e.y + CAMERA.up, z: e.z }, { x: -Math.sin(p.aimYaw), y: 0, z: Math.cos(p.aimYaw) }, off.right + 0.3) - 0.3;
+  const side = clamp(room, 0, off.right);
+  p.camSide = p.camSide === undefined ? side : side < p.camSide ? Math.max(side, p.camSide - 0.15) : Math.min(side, p.camSide + 0.03);
+  if (p.throwT > 0) p.throwT--;
   const move = input.moveVector ? input.moveVector(p.aimYaw) : { x: 0, z: 0 };
   const moving = Math.hypot(move.x, move.z) > 0.2;
   const fwd = { x: Math.cos(p.aimYaw), z: Math.sin(p.aimYaw) };
