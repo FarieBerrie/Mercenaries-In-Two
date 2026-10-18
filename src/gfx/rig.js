@@ -1,5 +1,5 @@
-// Skeletons. The people come from two rigs (3ds Max Biped for the Rocketbox avatars, Mixamo for
-// the armoured heavy) whose bones point along different axes and face different ways. Everything
+// Skeletons. Every person is a Rocketbox avatar on the 3ds Max Biped rig; this code also reads
+// Mixamo-named rigs, whose bones point along different axes and face different ways. Everything
 // procedural here works in world space from the live pose, measuring what it needs from the model
 // at load time (which way it faces, limb lengths, how each hand sits), so the same aiming, IK and
 // ragdoll code drives both.

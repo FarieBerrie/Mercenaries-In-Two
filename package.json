@@ -4,6 +4,9 @@
   "private": true,
   "description": "MERCENARIES IN TWO: a co-op third-person shooter for the browser. You and an AI partner, two private military contractors.",
   "type": "module",
+  "engines": {
+    "node": ">=22.12 <25"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",

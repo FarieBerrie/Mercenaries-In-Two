@@ -1,0 +1,12 @@
+# Render Blueprint: deploys the game as a static site. The build is plain HTML, JavaScript and
+# assets, so it's served from Render's CDN with nothing running on a server.
+# To use it: in the Render Dashboard choose New > Blueprint and pick this repository.
+# Node comes from "engines" in package.json.
+services:
+  - type: web
+    name: mercenaries-in-two
+    runtime: static
+    branch: main
+    buildCommand: npm ci && npm test && npm run build # a failing test stops the deploy
+    staticPublishPath: ./dist
+    autoDeployTrigger: commit # redeploy on every push to main

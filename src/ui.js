@@ -148,7 +148,7 @@ export function createUI(root, app) {
         <div class="screen shade-left">
           <div class="wrap">
             <div class="eyebrow">Private military contractors</div>
-            <div class="title">Double<br/>Contract</div>
+            <div class="title">Mercenaries<br/>In Two</div>
             <div class="rule"></div>
             <div class="menu">
               <button class="item" data-go="contracts">Contracts<small>Take a job. Get paid.</small></button>
@@ -462,7 +462,7 @@ export function createUI(root, app) {
         <div class="screen shade-full">
           <div class="wrap">
             <div class="eyebrow">Credits</div>
-            <div class="title">Double<br/>Contract</div>
+            <div class="title">Mercenaries<br/>In Two</div>
             <div class="rule"></div>
             <div class="brief-text" style="font-size:18px">
               An original co-op shooter. Every character, organisation, mission, mask design, line of dialogue and piece of music is made for this game; nothing is taken from any other game or franchise.<br/><br/>
